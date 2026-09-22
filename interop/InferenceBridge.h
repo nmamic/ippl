@@ -3,25 +3,33 @@
 
 #include <string>
 #include <cstdio>
+#include <iostream>
+#include <cstdlib>
+#include <exception>
 
 #include "Ippl.h"
 #include <pybind11/pybind11.h>
 
 namespace py = pybind11;
 
-class __attribute__((visibility("hidden"))) InferenceBridge {
+class InferenceBridge {
     private:
         py::module_ mod_;
 
         template <typename F>
-        void guarded(F&& f) {
-            try { f(); }
-            catch (py::error_already_set& e) {
+        auto guarded(F&& f) -> decltype(f()) {
+            try { 
+                return f(); 
+            } catch (py::error_already_set& e) {
                 e.restore();
                 PyErr_Print();
                 fflush(stderr);
-                ippl::Comm->abort();
+            } catch (const std::exception& e) {
+                std::cerr << "[InferenceBridge] rank " << ippl::Comm->rank()
+                          << ": C++ exception: " << e.what() << std::endl;
             }
+            ippl::Comm->abort();
+            std::abort();
         }
 
     public:
@@ -31,12 +39,14 @@ class __attribute__((visibility("hidden"))) InferenceBridge {
                 mod_ = py::module_::import(name.c_str());
             });
         }
-        void init(int rank, int size, int dev, const py::dict& p) {
-            guarded([&]{mod_.attr("init")(rank, size, dev, p);});
+
+        //Generic variadic call function, pybind converts params to Python objects
+        // and py::object::operator() is itself a variadic forwarding template
+        template <typename... Args>
+        py::object call(const char* fn, Args&&... args) {
+            return guarded([&]{return mod_.attr(fn)(std::forward<Args>(args)...); });
         }
-        void infer(const py::capsule& R, const py::capsule& E, size_t n) {
-            guarded([&]{ mod_.attr("infer")(R, E, n); });
-        }
+
         void finalize() {
             guarded([&]{ mod_.attr("finalize")(); });
             mod_ = py::object();

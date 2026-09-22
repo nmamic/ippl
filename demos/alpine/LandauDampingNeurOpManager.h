@@ -43,7 +43,7 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
             params["L"]  = L;
             params["kw"] = kw;
 
-            bridge->init(ippl::Comm->rank(), ippl::Comm->size(), Kokkos::device_id(), params);
+            bridge->call("init", ippl::Comm->rank(), ippl::Comm->size(), Kokkos::device_id(), params);
 
             inferField();
         }
@@ -82,7 +82,7 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
             py::capsule E_cap = ippl_dlpack::attrib_to_dlpack_vec(
                 pc->E, kokkos_dlpack::ReadOnly::No, kokkos_dlpack::DLPackVersion::Legacy);
 
-                bridge->infer(R_cap, E_cap, pc->getLocalNum());
+                bridge->call("infer", R_cap, E_cap, pc->getLocalNum());
         }
 
         void dump() override {
