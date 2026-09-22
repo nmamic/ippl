@@ -55,6 +55,11 @@ endif()
 add_alpine_example(PenningTrap)
 add_alpine_example(BumponTailInstability)
 
+if(IPPL_ENABLE_PYTHON_BRIDGE)
+  add_alpine_example(LandauDampingNeurOp)
+  target_link_libraries(LandauDampingNeurOp PRIVATE IPPL::python_bridge)
+endif()
+
 add_subdirectory(validation)
 
 if(IPPL_ENABLE_BENCHMARK)
