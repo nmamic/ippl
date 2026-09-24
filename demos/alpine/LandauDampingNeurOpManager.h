@@ -5,6 +5,7 @@
 #include "IpplDLPack.h"
 
 #include <pybind11/stl.h>
+#include <numeric>
 
 #include "InferenceBridge.h"
 
@@ -24,8 +25,118 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
                                InferenceBridge* bridge_)
         : Manager_t(totalP_, nt_, nr_, lbt_, solver_, stepMethod_, preconditioner_params_), bridge(bridge_) {}
 
+        void initializeParticlesPD() {
+            Inform m("Initialize Particles");
+
+            using DistR_t =
+                ippl::random::Distribution<double, Dim, 2 * Dim, CustomDistributionFunctions>;
+            double parR[2 * Dim];
+            for (unsigned int i = 0; i < Dim; i++) {
+                parR[i * 2]     = this->alpha_m;
+                parR[i * 2 + 1] = this->kw_m[i];
+            }
+            DistR_t distR(parR);
+
+            static IpplTimings::TimerRef particleCreation =
+                IpplTimings::getTimer("particlesCreation");
+            IpplTimings::startTimer(particleCreation);
+
+            // count set here instead of by sampler
+            // to avoid the inbalanced generation
+            const size_type totalP = this->totalP_m;
+            const size_type nranks = (size_type)ippl::Comm->size();
+            size_type nlocal       = totalP / nranks;
+            if ((size_type)ippl::Comm->rank() < (totalP - nlocal * nranks)) {
+                ++nlocal;   // distribute the rest over the lowest ranks
+            }
+
+            int seed = 42;
+            Kokkos::Random_XorShift64_Pool<> rand_pool64(
+                (size_type)(seed + 100 * ippl::Comm->rank()));
+
+            // local copies, since all four InverseTransformSampling parameters are
+            // non-const lvalue references, so member/temporary arguments will not bind.
+            Vector_t<double, Dim> rmin = this->rmin_m;
+            Vector_t<double, Dim> rmax = this->rmax_m;
+
+            using samplingR_t =
+                ippl::random::InverseTransformSampling<double, Dim,
+                                                       Kokkos::DefaultExecutionSpace, DistR_t>;
+            // this overload ( withno RegionLayout) calls updateBounds(rmax, rmin),
+            // setting umin/umax from the GLOBAL CDF range, and then nlocal_m =
+            // ntotal_m. So each rank samples the whole domain and gets exactly the
+            // count passed in. The RegionLayout overload instead does a volume
+            // factor per rank...
+            samplingR_t samplingR(distR, rmax, rmin, nlocal);
+
+            this->pcontainer_m->create(nlocal);
+
+            view_type R = this->pcontainer_m->R.getView();
+            samplingR.generate(R, rand_pool64);
+
+            view_type P = this->pcontainer_m->P.getView();
+            double mu[Dim];
+            double sd[Dim];
+            for (unsigned int i = 0; i < Dim; i++) {
+                mu[i] = 0.0;
+                sd[i] = 1.0;
+            }
+            Kokkos::parallel_for(nlocal,
+                                 ippl::random::randn<double, Dim>(P, rand_pool64, mu, sd));
+            Kokkos::fence();
+            ippl::Comm->barrier();
+
+            IpplTimings::stopTimer(particleCreation);
+
+            this->pcontainer_m->q = this->Q_m / totalP;
+
+            // no migration so no pc->update()
+            m << "particles created and initial conditions assigned " << endl;
+        }
+
+
         void pre_run() override {
-            Manager_t::pre_run();
+            //Manager_t::pre_run();
+            Inform m("Pre Run");
+
+            const double pi = Kokkos::numbers::pi_v<T>;
+
+            for (unsigned i = 0; i < Dim; i++) {
+                this->domain_m[i] = ippl::Index(this->nr_m[i]);
+            }
+
+            this->decomp_m.fill(true);
+
+            this->kw_m    = 0.5;
+            this->alpha_m = 0.05;
+            this->rmin_m  = 0.0;
+            this->rmax_m  = 2 * pi / this->kw_m;
+            this->hr_m    = this->rmax_m / this->nr_m;
+
+            // Q = -\int\int f dx dv
+            this->Q_m = std::reduce(this->rmax_m.begin(), this->rmax_m.end(), -1.,
+                                    std::multiplies<double>());
+            this->origin_m = this->rmin_m;
+            this->dt_m     = std::min(.05, 0.5 * *std::min_element(this->hr_m.begin(),
+                                                                   this->hr_m.end()));
+            this->it_m            = 0;
+            this->time_m          = 0.0;
+            this->isAllPeriodic_m = true;
+
+            m << "Discretization:" << endl
+              << "nt " << this->nt_m << " Np= " << this->totalP_m
+              << " grid = " << this->nr_m << endl;
+
+            this->setFieldContainer(std::make_shared<typename Manager_t::FieldContainer_t>(
+                this->hr_m, this->rmin_m, this->rmax_m, this->decomp_m, this->domain_m,
+                this->origin_m, this->isAllPeriodic_m));
+
+            this->setParticleContainer(std::make_shared<typename Manager_t::ParticleContainer_t>(
+                this->fcontainer_m->getMesh(), this->fcontainer_m->getFL(), false));
+
+            this->fcontainer_m->initializeFields(this->solver_m);
+
+            initializeParticlesPD();
 
             py::dict params;
             params["dim"]            = Dim;
@@ -46,6 +157,9 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
             bridge->call("init", ippl::Comm->rank(), ippl::Comm->size(), Kokkos::device_id(), params);
 
             inferField();
+            this->dump();
+
+            m << "Done" << endl;
         }
 
         void advance() override {
@@ -58,14 +172,17 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
 
             pc->P = pc->P - 0.5 * dt * pc->E;        // kick
             pc->R = pc->R + dt * pc->P;              // drift
-            pc->update();                            // migrate + periodic BC
 
-            bool isFirstRepartition = false;
-            if (this->loadbalancer_m->balance(this->totalP_m, this->it_m + 1)) {
-                auto* mesh = &fc->getRho().get_mesh();
-                auto* FL   = &fc->getFL();
-                this->loadbalancer_m->repartition(FL, mesh, isFirstRepartition);
-            }
+            //  Apply the periodic BC only to keep nlocal constant for the whole run.
+            auto& layout = pc->getLayout();
+            layout.applyBC(pc->R, layout.getRegionLayout().getDomain());                            // migrate + periodic BC
+
+            // bool isFirstRepartition = false;
+            // if (this->loadbalancer_m->balance(this->totalP_m, this->it_m + 1)) {
+            //     auto* mesh = &fc->getRho().get_mesh();
+            //     auto* FL   = &fc->getFL();
+            //     this->loadbalancer_m->repartition(FL, mesh, isFirstRepartition);
+            // }
 
             inferField(); //replaced par2grid, pic solver, then grid2par
 
