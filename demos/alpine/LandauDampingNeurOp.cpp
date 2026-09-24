@@ -87,6 +87,7 @@ int main(int argc, char* argv[]) {
 
             IpplTimings::stopTimer(mainTimer);
             IpplTimings::print();
+            IpplTimings::print(std::string("timing.dat"));
         } catch (py::error_already_set& e) {
             e.restore();
             PyErr_Print();

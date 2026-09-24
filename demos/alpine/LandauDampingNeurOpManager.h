@@ -73,6 +73,8 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
         }
 
         void inferField() {
+            static IpplTimings::TimerRef inferTimer = IpplTimings::getTimer("inference");
+
             auto pc = this->pcontainer_m;
             Kokkos::fence();
 
@@ -82,7 +84,10 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
             py::capsule E_cap = ippl_dlpack::attrib_to_dlpack_vec(
                 pc->E, kokkos_dlpack::ReadOnly::No, kokkos_dlpack::DLPackVersion::Legacy);
 
-                bridge->call("infer", R_cap, E_cap, pc->getLocalNum());
+            IpplTimings::startTimer(inferTimer);
+            bridge->call("infer", R_cap, E_cap, pc->getLocalNum());
+            Kokkos::fence();
+            IpplTimings::stopTimer(inferTimer);
         }
 
         void dump() override {
