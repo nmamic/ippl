@@ -96,7 +96,6 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
 
 
         void pre_run() override {
-            //Manager_t::pre_run();
             Inform m("Pre Run");
 
             const double pi = Kokkos::numbers::pi_v<T>;
@@ -133,8 +132,6 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
 
             this->setParticleContainer(std::make_shared<typename Manager_t::ParticleContainer_t>(
                 this->fcontainer_m->getMesh(), this->fcontainer_m->getFL(), false));
-
-            this->fcontainer_m->initializeFields(this->solver_m);
 
             initializeParticlesPD();
 
@@ -175,14 +172,7 @@ class LandauDampingNeurOpManager : public LandauDampingManager<T, Dim> {
 
             //  Apply the periodic BC only to keep nlocal constant for the whole run.
             auto& layout = pc->getLayout();
-            layout.applyBC(pc->R, layout.getRegionLayout().getDomain());                            // migrate + periodic BC
-
-            // bool isFirstRepartition = false;
-            // if (this->loadbalancer_m->balance(this->totalP_m, this->it_m + 1)) {
-            //     auto* mesh = &fc->getRho().get_mesh();
-            //     auto* FL   = &fc->getFL();
-            //     this->loadbalancer_m->repartition(FL, mesh, isFirstRepartition);
-            // }
+            layout.applyBC(pc->R, layout.getRegionLayout().getDomain());  // just the periodic BC
 
             inferField(); //replaced par2grid, pic solver, then grid2par
 
